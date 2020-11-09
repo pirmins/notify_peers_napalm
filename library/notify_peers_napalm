@@ -1,0 +1,210 @@
+#!/usr/bin/python
+
+from ansible.module_utils.basic import *
+
+import subprocess
+import argparse
+import sys
+import base64
+import os
+import re
+import requests
+import json
+import ast
+import smtplib
+from email.mime.multipart import MIMEMultipart
+from email.mime.text import MIMEText
+
+#define classes
+class Peer:
+    type = "IX-Peer"
+
+    def __init__(self, as_set, asn, ipv4, state, age, email):
+        self.as_set = as_set
+        self.asn = asn
+        self.ipv4 = ipv4
+        self.state = state
+        self.age = age
+        self.email = email
+    def __str__(self):
+        return '   AS       IPv4           State      Age   \n  %s   %s   %s   %s' % (self.asn,  self.ipv4, self.state, self.age)
+
+#API call for network
+def request_peeringdb_net(asn):
+        headers = {
+                'Accept': 'application/json',
+        }
+        params = (
+                ('asn', asn),
+        )
+        uri='https://'+my_peeringdb_usr+':'+my_peeringdb_pwd+'@peeringdb.com/api/net'
+        response = requests.get(uri, headers=headers, params=params)
+        return response.json()
+
+#API call for details
+def request_peeringdb_poc(id):
+        headers = {
+                'Accept': 'application/json',
+        }
+        params = (
+                ('net_id', id),
+        )
+        uri='https://'+my_peeringdb_usr+':'+my_peeringdb_pwd+'@peeringdb.com/api/poc'
+        response = requests.get(uri, headers=headers, params=params)
+        return response.json()
+
+#function that tests an IPs appartenance to a subnet, althought very simplified
+def in_subnet(ip,network):
+        n1,n2,n3,n4 = network.split('.')
+        i1,i2,i3,i4 = ip.split('.')
+        if n1 == i1 and n2 == i2:
+                return True
+        else:
+                return False
+
+
+#ipv4 checker
+def valid_ip(ip):
+    m = re.match(r"^(\d{1,3})\.(\d{1,3})\.(\d{1,3})\.(\d{1,3})$", ip)
+    return bool(m) and all(map(lambda n: 0 <= int(n) <= 255, m.groups()))
+
+#mail sending function
+def send_message(recipient, subject, body):
+    s = smtplib.SMTP(my_smtp_host, my_smtp_port)
+    if my_smtp_auth == 'true':
+        s.starttls()
+        s.login(my_smtp_login, my_smtp_pwd)
+    msg = MIMEMultipart()
+    message = body
+
+    # setup the parameters of the message
+    msg['From']=my_smtp_sender
+    msg['To']=recipient
+    msg['Subject']=subject
+
+    # add in the message body
+    msg.attach(MIMEText(message, 'plain'))
+
+    # send the message via the server set up earlier.
+    s.sendmail(my_smtp_sender,recipient,msg.as_string())
+    del msg
+
+    # Terminate the SMTP session and close the connection
+    s.quit()
+
+def objectify_json(bgp_neigh,network):
+    #parse str and define variables
+    plist = list()
+    bgp_dict = ast.literal_eval(bgp_neigh)
+#    import epdb; epdb.serve()
+    peers = bgp_dict['ansible_facts']['napalm_bgp_neighbors']['global']['peers']
+    for key in peers:
+        #print(key,' : ',peers[key])
+        ipv4 = key
+        asn = peers[key]['remote_as']
+        state = peers[key]['state']
+        age = peers[key]['uptime']
+        is_enabled = peers[key]['is_enabled']
+        is_up = peers[key]['is_up']
+
+        if valid_ip(ipv4) and in_subnet(ipv4,network) and is_enabled is True and is_up is False:
+            plist.append(Peer('',asn,ipv4,state,age,'noc@yourcompany.tld'))
+    return plist
+
+def add_info_obj(list):
+    for peer in list:
+        net_json = request_peeringdb_net(peer.asn)
+#        import epdb; epdb.serve()
+        if net_json['data'] != []:
+            id = net_json['data'][0]['id']
+            poc_json = request_peeringdb_poc(id)
+            noc = ''
+
+            for jelt in poc_json['data']:
+                if jelt['role'] == 'NOC':
+                    peer.email = jelt['email']
+                    noc = True
+                elif jelt['role'] == 'Technical' and not noc:
+                    peer.email = jelt['email']
+            peer.as_set = net_json['data'][0]['aka']
+            if peer.as_set == '':
+                peer.as_set = net_json['data'][0]['name']
+    return list
+
+def generate_email(list,notify_peers,notify_summary,ix):
+    summary = 'Following Peerings have been identified as in down state and remote NOCs have been informed about it:'
+    for peer in list:
+        subject = "Peering session with peer AS"+my_as+" down at "+ix
+        router_output = str(peer)
+        text = "Hello AS"+peer.asn+" NOC,\nWe are "+my_cpy_name+" AS"+my_as+" and are peering with you at "+ix+".\nUnfortunately, our peering session is down:\n\n"+router_output+" \n\nCould you please take a look at your side or notify us about any peering policy changes so we can take them into account.\nThank you,\n\nKind regards,\n"+my_cpy_name+" NOC\nE-Mail: "+my_noc_email+"\nPeeringDB: "+my_peeringdb_url
+        recipient = peer.email
+        if notify_peers:
+	    #lets send a notification to this peer
+            send_message(recipient, subject, text)
+        summary+="\n\n------------------------\n------------------------\n\nMail sent to: "+recipient+"\n------------------------\n"+subject+"\n------------------------\n"+text
+	#send a summary to your NOC
+    if notify_summary:
+        send_message(my_noc_email, 'Automated weekly peering renewal request summary', summary)
+
+
+def main():
+    fields = {
+	"input": {"required": True, "type": "str"},
+        "notify_peers": {"default": False, "type": "bool" },
+        "notify_summary": {"default": False, "type": "bool" },
+        "ix": {"required": True, "type": "str"},
+        "router_ip": {"required": True, "type": "str"},
+        "network": {"required": True, "type": "str"},	
+	"vars": {"required": True, "type": "dict"},
+    }
+    module = AnsibleModule(argument_spec=fields)
+
+    #set local vars
+    input = module.params['input']
+    notify_peers =  module.params['notify_peers']
+    notify_summary = module.params['notify_summary']
+    ix =  module.params['ix']
+    router_ip =  module.params['router_ip']
+    network =  module.params['network']
+    vars = module.params['vars']
+
+    #set those variables global
+    global my_as
+    global my_cpy_name
+    global my_noc_email
+    global my_peeringdb_url
+    global my_peeringdb_usr
+    global my_peeringdb_pwd
+    global my_smtp_host
+    global my_smtp_port
+    global my_smtp_auth
+    global my_smtp_login
+    global my_smtp_pwd
+    global my_smtp_sender
+	
+    #our code from the python script
+    my_as = vars['as']
+    my_cpy_name = vars['cpy_name']
+    my_noc_email = vars['noc_email']
+    my_peeringdb_url = vars['peeringdb_url']
+    my_peeringdb_usr = vars['peeringdb_usr']
+    my_peeringdb_pwd = vars['peeringdb_pwd']
+    my_smtp_host = vars['smtp_host']
+    my_smtp_port = vars['smtp_port']
+    my_smtp_auth = vars['smtp_auth']
+    my_smtp_login = vars['smtp_login']
+    my_smtp_pwd = vars['smtp_pwd']
+    my_smtp_sender = vars['smtp_sender']
+	
+    #strip the raw form to peering lines
+    rough_peer_list = objectify_json(input,network)
+    #report(parsed_list)
+    enriched_peer_list = add_info_obj(rough_peer_list)
+    #generate and send all Emails as well as a summary to your own NOC
+    generate_email(enriched_peer_list,notify_peers,notify_summary,ix)
+
+    module.exit_json(changed=False, meta=module.params)
+
+
+if __name__ == '__main__':
+    main()

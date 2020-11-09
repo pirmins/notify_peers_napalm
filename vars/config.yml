@@ -1,0 +1,14 @@
+---
+myvars:
+  as: '65500'
+  noc_email: 'yournoc@domain.tld'
+  cpy_name: 'CompanyLTD'
+  peeringdb_url: 'https://www.peeringdb.com/search?q=65500'
+  peeringdb_usr: 'login'
+  peeringdb_pwd: 'password'
+  smtp_auth: 'true'
+  smtp_login: 'peering@domain.tld'
+  smtp_pwd: 'password'
+  smtp_host: 'mail.domain.tld'
+  smtp_sender: 'peering@domain.tld'
+  smtp_port: '587'

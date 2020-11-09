@@ -1,0 +1,32 @@
+---
+- hosts: all
+  connection: local
+  gather_facts: no
+  vars:
+    ansible_python_interpreter: "/usr/bin/env python"
+          #    ansible_python_interpreter: /usr/bin/python2.7
+
+  tasks:
+    - name: Include only files matching config.yml
+      include_vars:
+        dir: vars
+        files_matching: config.yml
+
+    - name: collect bgp neighbors information
+      napalm_get_facts:
+        hostname={{ inventory_hostname }}
+        username={{ user }}
+        dev_os={{ os }}
+        password={{ passwd }}
+        filter='bgp_neighbors'
+      register: result
+
+    - name: process the show bgp in the module
+      notify_peers_napalm:
+        input: "{{ result }}"
+        notify_peers: "False"
+        notify_summary: "True"
+        vars: "{{ myvars }}"
+        ix: "{{ ix }}"
+        router_ip: "{{ inventory_hostname  }}"
+        network: "{{ network }}"

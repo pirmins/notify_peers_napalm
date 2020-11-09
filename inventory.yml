@@ -1,0 +1,13 @@
+---
+all:
+  vars:
+          #    username: 'default_user'
+          #    password: 'default_pass'
+          #    auth_pass: 'default_auth_pass'
+  children:
+    extreme:
+      hosts:
+        10.0.0.255:
+      vars:
+        ix: 'INTERNET-EXCHANGE'
+        network: '192.168.1.0'
